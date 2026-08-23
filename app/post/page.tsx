@@ -8,19 +8,11 @@ import AuthGate from "@/components/AuthGate";
 import { CATEGORIES, CITIES } from "@/lib/mockData";
 import { useAppStore } from "@/lib/store";
 import { useAuth, normalizePhone } from "@/lib/auth";
+import { compressImage } from "@/lib/imageUtils";
 import { CategorySlug, Condition, Listing } from "@/lib/types";
 
 const MAX_PHOTOS = 6;
 const IQD_PER_USD = 1460;
-
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result as string);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
 
 export default function PostAdPage() {
   const router = useRouter();
@@ -38,6 +30,7 @@ export default function PostAdPage() {
   const [submitting, setSubmitting] = useState(false);
   const [done, setDone] = useState(false);
   const [error, setError] = useState("");
+  const [compressing, setCompressing] = useState(false);
 
   // Pre-fill with the account's phone, but the seller can still change it
   // per-listing — e.g. if they lost their old number or mistyped it at signup.
@@ -47,9 +40,20 @@ export default function PostAdPage() {
 
   async function handlePhotoUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? []).slice(0, MAX_PHOTOS - photos.length);
-    const dataUrls = await Promise.all(files.map(fileToDataUrl));
-    setPhotos((p) => [...p, ...dataUrls].slice(0, MAX_PHOTOS));
-    e.target.value = "";
+    if (files.length === 0) return;
+    setCompressing(true);
+    setError("");
+    try {
+      // Downscale/compress before it ever touches state or storage — this is
+      // what keeps real phone photos from silently blowing the save quota.
+      const compressed = await Promise.all(files.map((f) => compressImage(f)));
+      setPhotos((p) => [...p, ...compressed].slice(0, MAX_PHOTOS));
+    } catch {
+      setError("نەتوانرا وێنەکە پرۆسێس بکرێت، تکایە وێنەیەکی تر تاقی بکەرەوە");
+    } finally {
+      setCompressing(false);
+      e.target.value = "";
+    }
   }
 
   function removePhoto(i: number) {
@@ -102,8 +106,15 @@ export default function PostAdPage() {
     // In production: upload `photos` to Supabase Storage, then insert via
     // createListing() in lib/supabase.ts, scoped to the authenticated
     // user's session (auth.uid() = seller_id per the RLS policy).
-    await new Promise((r) => setTimeout(r, 500));
-    addListing(newListing);
+    try {
+      await addListing(newListing);
+    } catch {
+      setSubmitting(false);
+      setError(
+        "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە وێنە کەمتر بەکاربهێنە یان دووبارە هەوڵبدەرەوە."
+      );
+      return;
+    }
 
     setSubmitting(false);
     setDone(true);
@@ -177,15 +188,26 @@ export default function PostAdPage() {
                 </div>
               ))}
               {photos.length < MAX_PHOTOS && (
-                <label className="aspect-square rounded-xl border-2 border-dashed border-gray-300 grid place-items-center text-gray-400 cursor-pointer hover:border-brand-400 hover:text-brand-500 transition-colors">
+                <label className={`aspect-square rounded-xl border-2 border-dashed grid place-items-center transition-colors ${
+                  compressing
+                    ? "border-brand-300 text-brand-500 cursor-wait"
+                    : "border-gray-300 text-gray-400 cursor-pointer hover:border-brand-400 hover:text-brand-500"
+                }`}>
                   <div className="text-center">
-                    <ImagePlus className="w-6 h-6 mx-auto mb-1" />
-                    <span className="text-[11px] font-medium">زیادکردن</span>
+                    {compressing ? (
+                      <Loader2 className="w-6 h-6 mx-auto mb-1 animate-spin" />
+                    ) : (
+                      <ImagePlus className="w-6 h-6 mx-auto mb-1" />
+                    )}
+                    <span className="text-[11px] font-medium">
+                      {compressing ? "پرۆسێسکردن..." : "زیادکردن"}
+                    </span>
                   </div>
                   <input
                     type="file"
                     accept="image/*"
                     multiple
+                    disabled={compressing}
                     className="hidden"
                     onChange={handlePhotoUpload}
                   />
@@ -295,7 +317,7 @@ export default function PostAdPage() {
 
           <button
             type="submit"
-            disabled={submitting}
+            disabled={submitting || compressing}
             className="w-full flex items-center justify-center gap-2 bg-brand-500 disabled:bg-gray-300 hover:bg-brand-600 transition-colors text-white font-bold rounded-full py-3.5"
           >
             {submitting && <Loader2 className="w-4 h-4 animate-spin" />}

@@ -74,7 +74,9 @@ kurdistan-marketplace/
 │   ├── mockData.ts               # Seed data for local dev
 │   ├── format.ts                 # Relative-time formatting (Kurdish)
 │   ├── store.tsx                 # City/currency/search + persisted listings CRUD
-│   ├── auth.tsx                  # Phone+OTP session (demo mode, Supabase-ready)
+│   ├── idbStore.ts               # Minimal IndexedDB key-value wrapper
+│   ├── imageUtils.ts             # Client-side photo compression before storage
+│   ├── auth.tsx                  # Phone-based session (demo mode, Supabase-ready)
 │   └── supabase.ts               # Supabase client + Auth/DB helpers
 ├── supabase/
 │   └── schema.sql                # users, categories, listings, featured_payments
@@ -110,6 +112,30 @@ A posted listing's seller **name** always comes from the signed-in account.
 The **contact phone** is pre-filled from the account too, but stays
 editable per-listing on the post form — sellers can override it if their
 number on file is outdated or was mistyped at signup.
+
+## Photo storage & why posted ads used to vanish
+
+Listings (including their photos) are persisted in **IndexedDB**
+(`lib/idbStore.ts`), not `localStorage`. An earlier build used
+`localStorage`, which caps out around 5-10MB per site — one or two
+full-resolution phone photos can exceed that on their own, so the save
+would silently fail and the ad would disappear on the next reload.
+
+Two fixes now cover this:
+
+1. **Compression first** (`lib/imageUtils.ts`) — every uploaded photo is
+   downscaled (max 1280px) and re-encoded as JPEG before it ever touches
+   state or storage, typically shrinking a multi-MB photo to well under
+   300KB.
+2. **Confirmed writes** — `addListing()` in `lib/store.tsx` is now
+   `async` and the post form (`app/post/page.tsx`) `await`s it. If the
+   save genuinely fails (e.g. IndexedDB unavailable), the form shows an
+   error immediately instead of a false "posted!" message that quietly
+   loses the ad.
+
+Anyone who posted ads on the old `localStorage`-based build won't lose
+them — the store migrates that data into IndexedDB automatically the
+first time the app loads.
 
 ## Featured / VIP listings — currently disabled
 

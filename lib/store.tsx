@@ -4,12 +4,14 @@ import {
   createContext,
   useContext,
   useEffect,
+  useRef,
   useState,
   useCallback,
   ReactNode,
 } from "react";
 import { Currency, Listing } from "./types";
 import { MOCK_LISTINGS } from "./mockData";
+import { idbGet, idbSet } from "./idbStore";
 
 const LISTINGS_KEY = "bazaar:listings";
 const CURRENCY_KEY = "bazaar:currency";
@@ -17,28 +19,41 @@ const CITY_KEY = "bazaar:city";
 
 export const ALL_CITIES_LABEL = "هەموو شارەکان";
 
-function loadListings(): Listing[] {
-  if (typeof window === "undefined") return MOCK_LISTINGS;
-  try {
-    const raw = window.localStorage.getItem(LISTINGS_KEY);
-    if (!raw) return MOCK_LISTINGS;
-    const stored: Listing[] = JSON.parse(raw);
-    // Merge: stored listings (includes edits/new posts) win over seed data by id
-    const byId = new Map(MOCK_LISTINGS.map((l) => [l.id, l]));
-    for (const l of stored) byId.set(l.id, l);
-    return Array.from(byId.values());
-  } catch {
-    return MOCK_LISTINGS;
-  }
+function mergeWithMock(stored: Listing[]): Listing[] {
+  const byId = new Map(MOCK_LISTINGS.map((l) => [l.id, l]));
+  for (const l of stored) byId.set(l.id, l);
+  return Array.from(byId.values());
 }
 
-function persistListings(listings: Listing[]) {
+/**
+ * Listings (including their photos) live in IndexedDB, not localStorage —
+ * localStorage caps out around 5-10MB per site, which even one or two
+ * uncompressed phone photos can exceed, causing posts to silently fail to
+ * save. IndexedDB's quota is dramatically larger and fits this use case.
+ */
+async function loadListings(): Promise<Listing[]> {
   try {
-    window.localStorage.setItem(LISTINGS_KEY, JSON.stringify(listings));
+    const stored = await idbGet<Listing[]>(LISTINGS_KEY);
+    if (stored) return mergeWithMock(stored);
   } catch {
-    // localStorage unavailable (private mode, quota) — fail silently,
-    // the session still works in-memory for this tab.
+    // IndexedDB unavailable — fall through to the one-time migration below
   }
+
+  // One-time migration for anyone who used an earlier build that stored
+  // listings in localStorage — carry that data forward instead of losing it.
+  try {
+    const raw = window.localStorage.getItem(LISTINGS_KEY);
+    if (raw) {
+      const legacy: Listing[] = JSON.parse(raw);
+      await idbSet(LISTINGS_KEY, legacy).catch(() => {});
+      window.localStorage.removeItem(LISTINGS_KEY);
+      return mergeWithMock(legacy);
+    }
+  } catch {
+    // ignore corrupt/unavailable legacy data
+  }
+
+  return MOCK_LISTINGS;
 }
 
 interface AppStore {
@@ -53,7 +68,8 @@ interface AppStore {
 
   // listings
   listings: Listing[];
-  addListing: (listing: Listing) => void;
+  /** Resolves once the new listing is confirmed saved; rejects if it wasn't. */
+  addListing: (listing: Listing) => Promise<void>;
   updateListing: (id: string, patch: Partial<Listing>) => void;
   deleteListing: (id: string) => void;
   getListingById: (id: string) => Listing | undefined;
@@ -68,26 +84,56 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [listings, setListings] = useState<Listing[]>(MOCK_LISTINGS);
   const [hydrated, setHydrated] = useState(false);
 
-  // Hydrate from localStorage on mount (client only, avoids SSR mismatch)
+  // Keep a ref in sync so add/update/delete can compute the *next* array
+  // synchronously and persist that exact value, instead of racing React's
+  // batched state updates.
+  const listingsRef = useRef<Listing[]>(listings);
   useEffect(() => {
-    setListings(loadListings());
-    const savedCurrency = window.localStorage.getItem(CURRENCY_KEY) as Currency | null;
-    const savedCity = window.localStorage.getItem(CITY_KEY);
-    if (savedCurrency === "IQD" || savedCurrency === "USD") setCurrency(savedCurrency);
-    if (savedCity) setCityState(savedCity);
-    setHydrated(true);
+    listingsRef.current = listings;
+  }, [listings]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      const loaded = await loadListings();
+      if (!cancelled) setListings(loaded);
+
+      try {
+        const savedCurrency = window.localStorage.getItem(CURRENCY_KEY) as Currency | null;
+        const savedCity = window.localStorage.getItem(CITY_KEY);
+        if (savedCurrency === "IQD" || savedCurrency === "USD") setCurrency(savedCurrency);
+        if (savedCity) setCityState(savedCity);
+      } catch {
+        // localStorage unavailable — filters just won't persist, non-critical
+      }
+
+      if (!cancelled) setHydrated(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (hydrated) persistListings(listings);
-  }, [listings, hydrated]);
-
-  useEffect(() => {
-    if (hydrated) window.localStorage.setItem(CURRENCY_KEY, currency);
+    if (hydrated) {
+      try {
+        window.localStorage.setItem(CURRENCY_KEY, currency);
+      } catch {
+        // non-critical
+      }
+    }
   }, [currency, hydrated]);
 
   useEffect(() => {
-    if (hydrated) window.localStorage.setItem(CITY_KEY, city);
+    if (hydrated) {
+      try {
+        window.localStorage.setItem(CITY_KEY, city);
+      } catch {
+        // non-critical
+      }
+    }
   }, [city, hydrated]);
 
   const setCity = useCallback((c: string) => setCityState(c), []);
@@ -96,16 +142,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const addListing = useCallback((listing: Listing) => {
-    setListings((prev) => [listing, ...prev]);
+  const addListing = useCallback(async (listing: Listing) => {
+    const next = [listing, ...listingsRef.current];
+    setListings(next);
+    // Persisted explicitly (not via a background effect) so the caller can
+    // await confirmation and show an error instead of a false "success".
+    await idbSet(LISTINGS_KEY, next);
   }, []);
 
   const updateListing = useCallback((id: string, patch: Partial<Listing>) => {
-    setListings((prev) => prev.map((l) => (l.id === id ? { ...l, ...patch } : l)));
+    const next = listingsRef.current.map((l) => (l.id === id ? { ...l, ...patch } : l));
+    setListings(next);
+    idbSet(LISTINGS_KEY, next).catch(() => {});
   }, []);
 
   const deleteListing = useCallback((id: string) => {
-    setListings((prev) => prev.filter((l) => l.id !== id));
+    const next = listingsRef.current.filter((l) => l.id !== id);
+    setListings(next);
+    idbSet(LISTINGS_KEY, next).catch(() => {});
   }, []);
 
   const getListingById = useCallback(
