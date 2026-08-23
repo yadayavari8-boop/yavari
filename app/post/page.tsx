@@ -1,22 +1,21 @@
 "use client";
 
+import { supabase } from "@/lib/supabase";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ImagePlus, X, Check, Loader2 } from "lucide-react";
 import Header from "@/components/Header";
 import AuthGate from "@/components/AuthGate";
 import { CATEGORIES, CITIES } from "@/lib/mockData";
-import { useAppStore } from "@/lib/store";
 import { useAuth, normalizePhone } from "@/lib/auth";
 import { compressImage } from "@/lib/imageUtils";
-import { CategorySlug, Condition, Listing } from "@/lib/types";
+import { CategorySlug, Condition } from "@/lib/types";
 
 const MAX_PHOTOS = 6;
 const IQD_PER_USD = 1460;
 
 export default function PostAdPage() {
   const router = useRouter();
-  const { addListing } = useAppStore();
   const { user, hydrated } = useAuth();
 
   const [photos, setPhotos] = useState<string[]>([]);
@@ -32,8 +31,6 @@ export default function PostAdPage() {
   const [error, setError] = useState("");
   const [compressing, setCompressing] = useState(false);
 
-  // Pre-fill with the account's phone, but the seller can still change it
-  // per-listing — e.g. if they lost their old number or mistyped it at signup.
   useEffect(() => {
     if (user) setContactPhone(user.phone);
   }, [user]);
@@ -44,8 +41,6 @@ export default function PostAdPage() {
     setCompressing(true);
     setError("");
     try {
-      // Downscale/compress before it ever touches state or storage — this is
-      // what keeps real phone photos from silently blowing the save quota.
       const compressed = await Promise.all(files.map((f) => compressImage(f)));
       setPhotos((p) => [...p, ...compressed].slice(0, MAX_PHOTOS));
     } catch {
@@ -81,44 +76,35 @@ export default function PostAdPage() {
     const priceIqd = Number(price);
     const priceUsd = Math.round(priceIqd / IQD_PER_USD);
 
-    const newListing: Listing = {
-      id: `local-${Date.now()}`,
-      title_ckb: title.trim(),
-      price_iqd: priceIqd,
-      price_usd: priceUsd,
-      currency_default: "IQD",
-      category: category as CategorySlug,
-      city: city as Listing["city"],
-      condition,
-      description_ckb: description.trim(),
-      images: photos,
-      is_featured: false,
-      is_sold: false,
-      // Seller name comes from the signed-in account. The contact number
-      // is editable per-listing — pre-filled from the account but the
-      // seller can override it here if it's out of date or was mistyped.
-      seller_id: user.id,
-      seller_name: user.name,
-      seller_phone: normalizePhone(contactPhone),
-      created_at: new Date().toISOString(),
-    };
-
-    // In production: upload `photos` to Supabase Storage, then insert via
-    // createListing() in lib/supabase.ts, scoped to the authenticated
-    // user's session (auth.uid() = seller_id per the RLS policy).
     try {
-      await addListing(newListing);
-    } catch {
-      setSubmitting(false);
-      setError(
-        "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە وێنە کەمتر بەکاربهێنە یان دووبارە هەوڵبدەرەوە."
-      );
-      return;
-    }
+      const { error: supabaseError } = await supabase.from("listings").insert([
+        {
+          title_ckb: title.trim(),
+          price_iqd: priceIqd,
+          price_usd: priceUsd,
+          currency_default: "IQD",
+          category: category,
+          city: city,
+          condition: condition,
+          description_ckb: description.trim(),
+          images: photos,
+          is_featured: false,
+          is_sold: false,
+          seller_id: user.id,
+          seller_name: user.name,
+          seller_phone: normalizePhone(contactPhone),
+        },
+      ]);
 
-    setSubmitting(false);
-    setDone(true);
-    setTimeout(() => router.push(`/item/${newListing.id}`), 1200);
+      if (supabaseError) throw supabaseError;
+
+      setSubmitting(false);
+      setDone(true);
+      setTimeout(() => router.push("/"), 1200);
+    } catch (err: any) {
+      setSubmitting(false);
+      setError("Failed to publish post: " + (err.message || "Unknown error"));
+    }
   }
 
   if (!hydrated) {
@@ -150,7 +136,7 @@ export default function PostAdPage() {
             <Check className="w-8 h-8 text-white" strokeWidth={3} />
           </div>
           <h1 className="text-lg font-bold text-ink">ڕیکلامەکەت بڵاوکرایەوە!</h1>
-          <p className="text-sm text-gray-500 mt-1">دەگەڕێیتەوە بۆ ڕیکلامەکەت...</p>
+          <p className="text-sm text-gray-500 mt-1">دەگەڕێیتەوە بۆ پەڕەی سەرەکی...</p>
         </div>
       </div>
     );
