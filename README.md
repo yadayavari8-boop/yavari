@@ -78,10 +78,12 @@ kurdistan-marketplace/
 │   ├── imageUtils.ts             # Client-side photo compression before storage
 │   ├── auth.tsx                  # Phone-based session (demo mode, Supabase-ready)
 │   ├── sanitize.ts               # LISTING_COLUMNS allowlist + payload sanitizer
+│   ├── errors.ts                 # extractMessage() — readable text from any thrown value
 │   └── supabase.ts               # Supabase client + Auth/DB/Storage helpers
 ├── supabase/
 │   ├── schema.sql                # Fresh-install schema: users, categories, listings, featured_payments
-│   └── fix_listings_schema.sql   # Idempotent repair script for a drifted live `listings` table
+│   ├── fix_listings_schema.sql   # Idempotent repair script for a drifted live `listings` table
+│   └── fix_storage_bucket.sql    # Idempotent fix for "Bucket not found" (listing-photos bucket + policies)
 ├── tailwind.config.ts
 ├── next.config.js
 └── package.json
@@ -207,6 +209,26 @@ much harder to hit again:
   form to see precisely what's being sent, or check the Network tab for
   the raw REST request to Supabase if you want to see it after
   client-side transformations too.
+
+## Fixing "Bucket not found" errors
+
+Storage buckets are separate from database tables — running the column
+migration alone doesn't create them. If posting an ad fails with
+`Bucket not found` (shown after uploading a photo, before the listing
+saves), run `supabase/fix_storage_bucket.sql` in the SQL editor. It
+creates the `listing-photos` bucket (public, so photos display without
+auth) plus its read/upload/delete policies, and is safe to re-run anytime.
+
+If that script itself errors, the file has manual dashboard steps in its
+trailing comment (Storage → New bucket → name it `listing-photos` → toggle
+Public on → still run the four `create policy` statements from the script
+afterward, since the dashboard alone doesn't add those).
+
+The post form now also tells these two failure modes apart automatically:
+a bucket problem shows a specific "storage bucket not set up" message
+pointing at this fix, instead of the generic save-failed message — see
+`extractMessage()` in `lib/errors.ts` and the upload-vs-save error
+handling in `app/post/page.tsx`.
 
 ## Featured / VIP listings — currently disabled
 

@@ -10,6 +10,7 @@ import { useAppStore } from "@/lib/store";
 import { useAuth, normalizePhone } from "@/lib/auth";
 import { compressImage } from "@/lib/imageUtils";
 import { isSupabaseConfigured, uploadListingPhotos } from "@/lib/supabase";
+import { extractMessage } from "@/lib/errors";
 import { CategorySlug, Condition, Listing } from "@/lib/types";
 
 const MAX_PHOTOS = 6;
@@ -93,9 +94,16 @@ export default function PostAdPage() {
       // Cloud mode: upload the already-compressed photos to Supabase
       // Storage and store their public URLs. Local mode: just store the
       // compressed data URLs directly (this device only).
-      const images = isSupabaseConfigured
-        ? await uploadListingPhotos(photoBlobs, user.id)
-        : photoPreviews;
+      let images: string[];
+      try {
+        images = isSupabaseConfigured
+          ? await uploadListingPhotos(photoBlobs, user.id)
+          : photoPreviews;
+      } catch (uploadErr) {
+        // Tag this so the outer catch can give a specific, actionable
+        // message instead of a generic "failed to save" one.
+        throw new Error(`PHOTO_UPLOAD: ${extractMessage(uploadErr)}`);
+      }
 
       const newListing: Omit<Listing, "id" | "created_at"> = {
         title_ckb: title.trim(),
@@ -124,22 +132,29 @@ export default function PostAdPage() {
     } catch (err) {
       // Log the real cause instead of guessing — open devtools console to
       // see this. Common causes: the `listing-photos` storage bucket or
-      // its policies aren't set up yet (see supabase/fix_listings_schema.sql),
-      // a schema-cache mismatch on the listings table, or a network issue.
+      // its policies aren't set up yet (see supabase/fix_storage_bucket.sql),
+      // a schema-cache mismatch on the listings table (see
+      // supabase/fix_listings_schema.sql), or a network issue.
       // eslint-disable-next-line no-console
       console.error("[post] failed to save listing:", err);
       setSubmitting(false);
-      const detail =
-        err instanceof Error
-          ? err.message
-          : typeof err === "object" && err !== null && "message" in err
-          ? String((err as { message: unknown }).message)
-          : "";
-      setError(
-        detail
-          ? `نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت: ${detail}`
-          : "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە دووبارە هەوڵبدەرەوە."
-      );
+      const raw = extractMessage(err);
+      const isUploadError = raw.startsWith("PHOTO_UPLOAD: ");
+      const detail = isUploadError ? raw.replace("PHOTO_UPLOAD: ", "") : raw;
+
+      if (/bucket not found/i.test(detail)) {
+        setError(
+          "بەردەستنەبوونی وێنە: بوکێتی وێنەکان لە Supabase دروست نەکراوە. supabase/fix_storage_bucket.sql جێبەجێ بکە لە SQL Editor."
+        );
+      } else if (isUploadError) {
+        setError(`بارکردنی وێنە سەرکەوتوو نەبوو: ${detail}`);
+      } else {
+        setError(
+          detail
+            ? `نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت: ${detail}`
+            : "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە دووبارە هەوڵبدەرەوە."
+        );
+      }
     }
   }
 
