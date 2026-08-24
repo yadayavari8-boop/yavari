@@ -100,6 +100,9 @@ export default function PostAdPage() {
 
       setSubmitting(false);
       setDone(true);
+
+      // Force Next.js to fetch fresh dynamic data on redirect
+      router.refresh();
       setTimeout(() => router.push("/"), 1200);
     } catch (err: any) {
       setSubmitting(false);
