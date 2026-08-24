@@ -121,10 +121,24 @@ export default function PostAdPage() {
       setSubmitting(false);
       setDone(true);
       setTimeout(() => router.push(`/item/${saved.id}`), 1200);
-    } catch {
+    } catch (err) {
+      // Log the real cause instead of guessing — open devtools console to
+      // see this. Common causes: the `listing-photos` storage bucket or
+      // its policies aren't set up yet (see supabase/fix_listings_schema.sql),
+      // a schema-cache mismatch on the listings table, or a network issue.
+      // eslint-disable-next-line no-console
+      console.error("[post] failed to save listing:", err);
       setSubmitting(false);
+      const detail =
+        err instanceof Error
+          ? err.message
+          : typeof err === "object" && err !== null && "message" in err
+          ? String((err as { message: unknown }).message)
+          : "";
       setError(
-        "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە وێنە کەمتر بەکاربهێنە یان دووبارە هەوڵبدەرەوە."
+        detail
+          ? `نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت: ${detail}`
+          : "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە دووبارە هەوڵبدەرەوە."
       );
     }
   }
