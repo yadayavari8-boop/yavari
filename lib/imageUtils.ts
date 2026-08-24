@@ -1,14 +1,21 @@
+export interface CompressedImage {
+  /** Small enough to persist directly in local (non-cloud) mode. */
+  dataUrl: string;
+  /** Same compressed image as a Blob, ready to upload to cloud storage. */
+  blob: Blob;
+}
+
 /**
  * Downscales and re-encodes an uploaded photo before it's stored anywhere.
  * A raw phone-camera photo can easily be 3-8MB; this brings it down to a
  * few hundred KB, which is the difference between listings actually saving
- * and silently failing once storage quota is hit.
+ * and silently failing once storage quota (or upload size limits) are hit.
  */
 export function compressImage(
   file: File,
   maxDimension = 1280,
   quality = 0.72
-): Promise<string> {
+): Promise<CompressedImage> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onerror = () => reject(reader.error);
@@ -36,7 +43,19 @@ export function compressImage(
           return;
         }
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+
+        const dataUrl = canvas.toDataURL("image/jpeg", quality);
+        canvas.toBlob(
+          (blob) => {
+            if (!blob) {
+              reject(new Error("failed to create image blob"));
+              return;
+            }
+            resolve({ dataUrl, blob });
+          },
+          "image/jpeg",
+          quality
+        );
       };
       img.src = reader.result as string;
     };

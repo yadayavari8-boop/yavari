@@ -73,13 +73,15 @@ kurdistan-marketplace/
 │   ├── types.ts                 # Domain types (Listing, Category, City...)
 │   ├── mockData.ts               # Seed data for local dev
 │   ├── format.ts                 # Relative-time formatting (Kurdish)
-│   ├── store.tsx                 # City/currency/search + persisted listings CRUD
-│   ├── idbStore.ts               # Minimal IndexedDB key-value wrapper
+│   ├── store.tsx                 # City/currency/search + dual-mode listings CRUD
+│   ├── idbStore.ts               # Minimal IndexedDB key-value wrapper (local mode)
 │   ├── imageUtils.ts             # Client-side photo compression before storage
 │   ├── auth.tsx                  # Phone-based session (demo mode, Supabase-ready)
-│   └── supabase.ts               # Supabase client + Auth/DB helpers
+│   ├── sanitize.ts               # LISTING_COLUMNS allowlist + payload sanitizer
+│   └── supabase.ts               # Supabase client + Auth/DB/Storage helpers
 ├── supabase/
-│   └── schema.sql                # users, categories, listings, featured_payments
+│   ├── schema.sql                # Fresh-install schema: users, categories, listings, featured_payments
+│   └── fix_listings_schema.sql   # Idempotent repair script for a drifted live `listings` table
 ├── tailwind.config.ts
 ├── next.config.js
 └── package.json
@@ -113,29 +115,98 @@ The **contact phone** is pre-filled from the account too, but stays
 editable per-listing on the post form — sellers can override it if their
 number on file is outdated or was mistyped at signup.
 
-## Photo storage & why posted ads used to vanish
+## Cloud sync vs. local-only mode — and why ads didn't show on other devices
 
-Listings (including their photos) are persisted in **IndexedDB**
-(`lib/idbStore.ts`), not `localStorage`. An earlier build used
-`localStorage`, which caps out around 5-10MB per site — one or two
-full-resolution phone photos can exceed that on their own, so the save
-would silently fail and the ad would disappear on the next reload.
+The app runs in one of two modes, decided automatically by whether
+Supabase credentials are set:
 
-Two fixes now cover this:
+- **Local mode (default, no setup)** — listings live in this browser's own
+  IndexedDB (`lib/idbStore.ts`). This is why a listing posted on a PC never
+  showed up on a phone: they're two completely separate, sandboxed storage
+  areas with no connection between them. There's no way to fix that from
+  the client side alone — it needs a shared backend.
+- **Cloud mode** — once `.env.local` has real Supabase credentials
+  (`isSupabaseConfigured` in `lib/supabase.ts` flips to `true`), listings
+  read from and write to a shared Postgres table instead, and a Realtime
+  subscription pushes new/changed/deleted listings to every connected
+  device live — no refresh needed. `useAppStore().syncMode` reports which
+  mode is active, and a small dismissible banner
+  (`components/SyncModeBanner.tsx`) tells people when they're in local
+  mode so it isn't a silent surprise.
 
-1. **Compression first** (`lib/imageUtils.ts`) — every uploaded photo is
-   downscaled (max 1280px) and re-encoded as JPEG before it ever touches
-   state or storage, typically shrinking a multi-MB photo to well under
-   300KB.
-2. **Confirmed writes** — `addListing()` in `lib/store.tsx` is now
-   `async` and the post form (`app/post/page.tsx`) `await`s it. If the
-   save genuinely fails (e.g. IndexedDB unavailable), the form shows an
-   error immediately instead of a false "posted!" message that quietly
-   loses the ad.
+**To turn on cloud mode (~5 minutes):**
 
-Anyone who posted ads on the old `localStorage`-based build won't lose
-them — the store migrates that data into IndexedDB automatically the
-first time the app loads.
+1. Create a free project at [supabase.com](https://supabase.com).
+2. Open the SQL editor and run `supabase/schema.sql` — this creates the
+   tables, seeds categories, and sets up the `listing-photos` storage
+   bucket.
+3. Copy **Project URL** and **anon public key** from Settings → API into
+   `.env.local`:
+   ```
+   NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+   NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+   ```
+4. Restart the dev server / redeploy. Listings now sync across every
+   device automatically.
+
+### Photo storage & compression
+
+Every uploaded photo is downscaled (max 1280px) and re-encoded as JPEG
+client-side (`lib/imageUtils.ts`) before it's stored anywhere, typically
+shrinking a multi-MB phone photo to well under 300KB. In local mode this
+keeps IndexedDB's quota from being an issue; in cloud mode it keeps
+uploads to the `listing-photos` bucket fast and cheap.
+
+Posting an ad now `await`s confirmed persistence (`addListing()` in
+`lib/store.tsx`) before showing "posted!" — if a save genuinely fails, the
+form shows a real error instead of a false success that quietly loses the
+ad. Anyone who posted ads on an older `localStorage`-based build won't
+lose them either — the store migrates that data into IndexedDB
+automatically the first time the app loads.
+
+### A known trade-off worth knowing about
+
+Since login (`lib/auth.tsx`) is currently a lightweight local sign-in
+(name + phone + city, no SMS code) rather than real Supabase phone-auth,
+`supabase/schema.sql`'s Row Level Security policies are intentionally left
+**open** — anyone with the app's public anon key can technically insert,
+update, or delete any listing, not just their own. That's a reasonable
+trade-off for getting cross-device sync working now without adding back
+the OTP step, but it should be tightened before a real public launch:
+switch `lib/auth.tsx` over to the `requestOtp`/`verifyOtp` calls already
+sitting in `lib/supabase.ts`, then change the RLS policies from
+`using (true)` to `auth.uid()::text = seller_id` (the schema file's
+comments mark exactly where).
+
+## Fixing "column not found in schema cache" errors
+
+If your live Supabase `listings` table has drifted out of sync with the
+app (a common symptom: every fix reveals another missing column), run
+`supabase/fix_listings_schema.sql` instead of hand-patching columns one at
+a time. It's fully idempotent — every statement uses `IF NOT EXISTS` /
+`DROP...IF EXISTS`, so it's safe to paste into the Supabase SQL editor and
+run repeatedly from any starting state. It also ends with
+`notify pgrst, 'reload schema';` to force PostgREST to pick up the change
+immediately (if a stale-schema error still shows up afterward, use
+**Project Settings → API → Reload schema** in the dashboard as a manual
+fallback — this is occasionally needed with a pooled connection in
+transaction mode).
+
+Two code-level safeguards now back this up so the same class of error is
+much harder to hit again:
+
+- **`lib/sanitize.ts`** exports `LISTING_COLUMNS` — the single source of
+  truth for every real column on the table — and `sanitizePayload()`,
+  which strips any key not in that list (plus any `undefined` values)
+  before a payload is sent. `insertListing()`/`updateListingRow()` in
+  `lib/supabase.ts` both run every payload through it automatically, so a
+  stray or renamed frontend field can no longer reach PostgREST at all.
+- Those same two functions log the exact sanitized payload to the console
+  in development (`[supabase] insert → listings payload: ...`) right
+  before the request goes out — open devtools when submitting the post
+  form to see precisely what's being sent, or check the Network tab for
+  the raw REST request to Supabase if you want to see it after
+  client-side transformations too.
 
 ## Featured / VIP listings — currently disabled
 

@@ -1,6 +1,7 @@
 -- ============================================================================
 -- Bazaar Kurdistan — Database Schema (Supabase / PostgreSQL)
--- Phone-first, RLS-secured schema for a local buy/sell marketplace.
+-- Local buy/sell marketplace, currently running lightweight sign-in
+-- (name + phone + city, no SMS code) instead of full Supabase phone-auth.
 -- ============================================================================
 
 create extension if not exists "uuid-ossp";
@@ -15,17 +16,18 @@ create type payment_status_enum as enum ('pending', 'paid', 'failed', 'refunded'
 
 -- ---------------------------------------------------------------------------
 -- USERS
--- Mirrors/extends Supabase's built-in `auth.users` (phone-based auth).
--- One row is created here via a trigger the first time someone verifies
--- their SMS OTP.
+-- Informational profile table. Not currently linked to auth.users or
+-- referenced by listings.seller_id — see the note on listings below for why.
+-- Once real Supabase phone-auth (requestOtp/verifyOtp in lib/supabase.ts)
+-- is wired in, re-connect this via the trigger at the bottom of this file.
 -- ---------------------------------------------------------------------------
 create table public.users (
-  id            uuid primary key references auth.users(id) on delete cascade,
+  id            uuid primary key default uuid_generate_v4(),
   full_name     text not null,
   phone         text not null unique,               -- E.164 format, e.g. +9647501234567
   city          city_enum not null default 'هەولێر',
   avatar_url    text,
-  is_verified   boolean not null default false,      -- phone OTP confirmed
+  is_verified   boolean not null default false,      -- true once real phone OTP is wired in
   rating        numeric(2,1) not null default 5.0,
   created_at    timestamptz not null default now()
 );
@@ -54,10 +56,25 @@ insert into public.categories (slug, name_ckb, name_en, icon, sort_order) values
 
 -- ---------------------------------------------------------------------------
 -- LISTINGS
+--
+-- NOTE on seller_id: this is intentionally a plain `text` field, not a uuid
+-- foreign key into auth.users/public.users. The app currently signs people
+-- in locally (name + phone + city, no SMS verification) rather than through
+-- real Supabase Auth, so there is no auth.uid() to key off yet. seller_id
+-- is just whatever id the client's lightweight session generated — the
+-- listing's seller_name/seller_phone columns already carry everything
+-- needed to display and contact the seller, independent of that id.
+--
+-- When you're ready to require real phone verification: switch
+-- lib/auth.tsx over to requestOtp/verifyOtp in lib/supabase.ts, change this
+-- column to `uuid references public.users(id)`, and tighten the RLS
+-- policies below from "open" to `auth.uid() = seller_id`.
 -- ---------------------------------------------------------------------------
 create table public.listings (
   id              uuid primary key default uuid_generate_v4(),
-  seller_id       uuid not null references public.users(id) on delete cascade,
+  seller_id       text not null,
+  seller_name     text not null,
+  seller_phone    text not null,                       -- E.164 format
   category        text not null references public.categories(slug),
   title_ckb       text not null,
   description_ckb text not null default '',
@@ -67,8 +84,8 @@ create table public.listings (
   condition       condition_enum not null default 'used',
   city            city_enum not null,
   neighborhood    text,
-  images          text[] not null default '{}',        -- Supabase Storage public URLs
-  is_featured     boolean not null default false,       -- true while a featured_payments row is active
+  images          text[] not null default '{}',        -- public URLs from the listing-photos bucket
+  is_featured     boolean not null default false,       -- reserved for future paid promotion — unused for now
   is_sold         boolean not null default false,
   view_count      integer not null default 0,
   created_at      timestamptz not null default now(),
@@ -77,34 +94,30 @@ create table public.listings (
 
 create index listings_city_idx        on public.listings (city);
 create index listings_category_idx    on public.listings (category);
-create index listings_active_feed_idx on public.listings (is_sold, is_featured desc, created_at desc);
+create index listings_active_feed_idx on public.listings (is_sold, created_at desc);
 create index listings_seller_idx      on public.listings (seller_id);
 
 -- ---------------------------------------------------------------------------
 -- FEATURED_PAYMENTS
--- Records the "Promote Listing" upsell — each row represents one paid
--- boost window for a listing (e.g. 7-day VIP placement).
+-- Not currently used by the app (no paid promotion right now) — kept here
+-- so re-enabling it later doesn't require a schema migration.
 -- ---------------------------------------------------------------------------
 create table public.featured_payments (
   id              uuid primary key default uuid_generate_v4(),
   listing_id      uuid not null references public.listings(id) on delete cascade,
-  user_id         uuid not null references public.users(id) on delete cascade,
-  plan            text not null default 'vip_7day',     -- 'vip_3day' | 'vip_7day' | 'vip_30day'
+  seller_id       text not null,
+  plan            text not null default 'vip_7day',
   amount_iqd      bigint not null check (amount_iqd >= 0),
   status          payment_status_enum not null default 'pending',
-  payment_ref     text,                                  -- gateway transaction id (FastPay, FIB, etc.)
+  payment_ref     text,
   starts_at       timestamptz,
   expires_at      timestamptz,
   created_at      timestamptz not null default now()
 );
 
-create index featured_payments_listing_idx on public.featured_payments (listing_id);
-
 -- ---------------------------------------------------------------------------
 -- TRIGGERS
 -- ---------------------------------------------------------------------------
-
--- Keep `updated_at` fresh on listings.
 create or replace function public.touch_updated_at()
 returns trigger language plpgsql as $$
 begin
@@ -117,68 +130,46 @@ create trigger listings_touch_updated_at
 before update on public.listings
 for each row execute function public.touch_updated_at();
 
--- Auto-create a public.users profile row when someone verifies phone OTP
--- for the first time (auth.users insert).
-create or replace function public.handle_new_auth_user()
-returns trigger language plpgsql security definer as $$
-begin
-  insert into public.users (id, full_name, phone, is_verified)
-  values (new.id, coalesce(new.raw_user_meta_data->>'full_name', 'بەکارهێنەر'), new.phone, true)
-  on conflict (id) do nothing;
-  return new;
-end;
-$$;
-
-create trigger on_auth_user_created
-after insert on auth.users
-for each row execute function public.handle_new_auth_user();
-
--- When a featured_payments row is marked 'paid', flip the listing's
--- is_featured flag on; a scheduled job (pg_cron) flips it off at expires_at.
-create or replace function public.activate_featured_listing()
-returns trigger language plpgsql as $$
-begin
-  if new.status = 'paid' and old.status is distinct from 'paid' then
-    update public.listings
-      set is_featured = true
-      where id = new.listing_id;
-  end if;
-  return new;
-end;
-$$;
-
-create trigger featured_payments_activate
-after update on public.featured_payments
-for each row execute function public.activate_featured_listing();
-
 -- ---------------------------------------------------------------------------
 -- ROW LEVEL SECURITY
+--
+-- These policies are deliberately OPEN (not scoped to auth.uid()) because
+-- there is no real Supabase Auth session yet — see the note on the listings
+-- table above. That means anyone with the anon key can technically insert,
+-- update, or delete any listing, not just their own. That's an acceptable
+-- trade-off for an early/internal build, but tighten this before a public
+-- launch: once real phone verification is wired in, replace `using (true)`
+-- / `with check (true)` below with `auth.uid()::text = seller_id`.
 -- ---------------------------------------------------------------------------
 alter table public.users             enable row level security;
 alter table public.listings          enable row level security;
 alter table public.featured_payments enable row level security;
 
--- USERS: everyone can read basic seller info; only the owner can edit it.
 create policy "public read users"   on public.users for select using (true);
-create policy "self update users"   on public.users for update using (auth.uid() = id);
+create policy "public insert users" on public.users for insert with check (true);
 
--- LISTINGS: anyone can browse active listings; only the owning seller can
--- create/update/delete their own.
-create policy "public read listings" on public.listings
-  for select using (true);
+create policy "public read listings"   on public.listings for select using (true);
+create policy "public insert listings" on public.listings for insert with check (true);
+create policy "public update listings" on public.listings for update using (true);
+create policy "public delete listings" on public.listings for delete using (true);
 
-create policy "owner insert listings" on public.listings
-  for insert with check (auth.uid() = seller_id);
+create policy "public read payments"   on public.featured_payments for select using (true);
+create policy "public insert payments" on public.featured_payments for insert with check (true);
 
-create policy "owner update listings" on public.listings
-  for update using (auth.uid() = seller_id);
+-- ---------------------------------------------------------------------------
+-- STORAGE — listing photos
+-- Public bucket: anyone can view photos, anyone can upload (same open
+-- trade-off as above, until real auth is wired in).
+-- ---------------------------------------------------------------------------
+insert into storage.buckets (id, name, public)
+values ('listing-photos', 'listing-photos', true)
+on conflict (id) do nothing;
 
-create policy "owner delete listings" on public.listings
-  for delete using (auth.uid() = seller_id);
+create policy "public read listing photos" on storage.objects
+  for select using (bucket_id = 'listing-photos');
 
--- FEATURED_PAYMENTS: sellers can see/create their own payment records only.
-create policy "owner read payments" on public.featured_payments
-  for select using (auth.uid() = user_id);
+create policy "public upload listing photos" on storage.objects
+  for insert with check (bucket_id = 'listing-photos');
 
-create policy "owner insert payments" on public.featured_payments
-  for insert with check (auth.uid() = user_id);
+create policy "public delete listing photos" on storage.objects
+  for delete using (bucket_id = 'listing-photos');

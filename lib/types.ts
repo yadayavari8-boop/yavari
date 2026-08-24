@@ -23,6 +23,11 @@ export type Condition = "new" | "used";
 export interface Listing {
   id: string;
   title_ckb: string;
+  // Optional localized fields — nullable in the DB, not yet populated by
+  // the current UI (which only writes Kurdish), but reserved so the app
+  // can start filling them in later without another migration.
+  title_ar?: string;
+  title_en?: string;
   price_iqd: number;
   price_usd: number;
   currency_default: Currency;
@@ -31,6 +36,8 @@ export interface Listing {
   neighborhood?: string;
   condition: Condition;
   description_ckb: string;
+  description_ar?: string;
+  description_en?: string;
   images: string[];
   is_featured: boolean;
   is_sold: boolean;

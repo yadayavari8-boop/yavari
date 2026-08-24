@@ -1,24 +1,30 @@
 "use client";
 
-import { supabase } from "@/lib/supabase";
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { ImagePlus, X, Check, Loader2 } from "lucide-react";
 import Header from "@/components/Header";
 import AuthGate from "@/components/AuthGate";
 import { CATEGORIES, CITIES } from "@/lib/mockData";
+import { useAppStore } from "@/lib/store";
 import { useAuth, normalizePhone } from "@/lib/auth";
 import { compressImage } from "@/lib/imageUtils";
-import { CategorySlug, Condition } from "@/lib/types";
+import { isSupabaseConfigured, uploadListingPhotos } from "@/lib/supabase";
+import { CategorySlug, Condition, Listing } from "@/lib/types";
 
 const MAX_PHOTOS = 6;
 const IQD_PER_USD = 1460;
 
 export default function PostAdPage() {
   const router = useRouter();
+  const { addListing } = useAppStore();
   const { user, hydrated } = useAuth();
 
-  const [photos, setPhotos] = useState<string[]>([]);
+  // photoPreviews: compressed data URLs, always used for on-screen preview.
+  // photoBlobs: the same compressed images as Blobs, used to upload to
+  // Supabase Storage when a cloud backend is connected.
+  const [photoPreviews, setPhotoPreviews] = useState<string[]>([]);
+  const [photoBlobs, setPhotoBlobs] = useState<Blob[]>([]);
   const [category, setCategory] = useState<CategorySlug | "">("");
   const [city, setCity] = useState<string>("");
   const [condition, setCondition] = useState<Condition>("used");
@@ -31,18 +37,24 @@ export default function PostAdPage() {
   const [error, setError] = useState("");
   const [compressing, setCompressing] = useState(false);
 
+  // Pre-fill with the account's phone, but the seller can still change it
+  // per-listing — e.g. if they lost their old number or mistyped it at signup.
   useEffect(() => {
     if (user) setContactPhone(user.phone);
   }, [user]);
 
   async function handlePhotoUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const files = Array.from(e.target.files ?? []).slice(0, MAX_PHOTOS - photos.length);
+    const files = Array.from(e.target.files ?? []).slice(0, MAX_PHOTOS - photoPreviews.length);
     if (files.length === 0) return;
     setCompressing(true);
     setError("");
     try {
+      // Downscale/compress before it ever touches state or storage — this is
+      // what keeps real phone photos from silently blowing local storage,
+      // and keeps cloud uploads fast.
       const compressed = await Promise.all(files.map((f) => compressImage(f)));
-      setPhotos((p) => [...p, ...compressed].slice(0, MAX_PHOTOS));
+      setPhotoPreviews((p) => [...p, ...compressed.map((c) => c.dataUrl)].slice(0, MAX_PHOTOS));
+      setPhotoBlobs((p) => [...p, ...compressed.map((c) => c.blob)].slice(0, MAX_PHOTOS));
     } catch {
       setError("نەتوانرا وێنەکە پرۆسێس بکرێت، تکایە وێنەیەکی تر تاقی بکەرەوە");
     } finally {
@@ -52,11 +64,12 @@ export default function PostAdPage() {
   }
 
   function removePhoto(i: number) {
-    setPhotos((p) => p.filter((_, idx) => idx !== i));
+    setPhotoPreviews((p) => p.filter((_, idx) => idx !== i));
+    setPhotoBlobs((p) => p.filter((_, idx) => idx !== i));
   }
 
   const isValid =
-    photos.length > 0 &&
+    photoPreviews.length > 0 &&
     category !== "" &&
     city !== "" &&
     title.trim().length > 0 &&
@@ -77,36 +90,42 @@ export default function PostAdPage() {
     const priceUsd = Math.round(priceIqd / IQD_PER_USD);
 
     try {
-      const { error: supabaseError } = await supabase.from("listings").insert([
-        {
-          title_ckb: title.trim(),
-          price_iqd: priceIqd,
-          price_usd: priceUsd,
-          currency_default: "IQD",
-          category: category,
-          city: city,
-          condition: condition,
-          description_ckb: description.trim(),
-          images: photos,
-          is_featured: false,
-          is_sold: false,
-          seller_id: user.id,
-          seller_name: user.name,
-          seller_phone: normalizePhone(contactPhone),
-        },
-      ]);
+      // Cloud mode: upload the already-compressed photos to Supabase
+      // Storage and store their public URLs. Local mode: just store the
+      // compressed data URLs directly (this device only).
+      const images = isSupabaseConfigured
+        ? await uploadListingPhotos(photoBlobs, user.id)
+        : photoPreviews;
 
-      if (supabaseError) throw supabaseError;
+      const newListing: Omit<Listing, "id" | "created_at"> = {
+        title_ckb: title.trim(),
+        price_iqd: priceIqd,
+        price_usd: priceUsd,
+        currency_default: "IQD",
+        category: category as CategorySlug,
+        city: city as Listing["city"],
+        condition,
+        description_ckb: description.trim(),
+        images,
+        is_featured: false,
+        is_sold: false,
+        // Seller name comes from the signed-in account. The contact number
+        // is editable per-listing — pre-filled from the account but the
+        // seller can override it here if it's out of date or was mistyped.
+        seller_id: user.id,
+        seller_name: user.name,
+        seller_phone: normalizePhone(contactPhone),
+      };
 
+      const saved = await addListing(newListing);
       setSubmitting(false);
       setDone(true);
-
-      // Force Next.js to fetch fresh dynamic data on redirect
-      router.refresh();
-      setTimeout(() => router.push("/"), 1200);
-    } catch (err: any) {
+      setTimeout(() => router.push(`/item/${saved.id}`), 1200);
+    } catch {
       setSubmitting(false);
-      setError("Failed to publish post: " + (err.message || "Unknown error"));
+      setError(
+        "نەتوانرا ڕیکلامەکە پاشەکەوت بکرێت. تکایە وێنە کەمتر بەکاربهێنە یان دووبارە هەوڵبدەرەوە."
+      );
     }
   }
 
@@ -139,7 +158,7 @@ export default function PostAdPage() {
             <Check className="w-8 h-8 text-white" strokeWidth={3} />
           </div>
           <h1 className="text-lg font-bold text-ink">ڕیکلامەکەت بڵاوکرایەوە!</h1>
-          <p className="text-sm text-gray-500 mt-1">دەگەڕێیتەوە بۆ پەڕەی سەرەکی...</p>
+          <p className="text-sm text-gray-500 mt-1">دەگەڕێیتەوە بۆ ڕیکلامەکەت...</p>
         </div>
       </div>
     );
@@ -155,9 +174,9 @@ export default function PostAdPage() {
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-7">
-          <Field label={`وێنەکان (${photos.length}/${MAX_PHOTOS})`}>
+          <Field label={`وێنەکان (${photoPreviews.length}/${MAX_PHOTOS})`}>
             <div className="grid grid-cols-3 sm:grid-cols-4 gap-2">
-              {photos.map((src, i) => (
+              {photoPreviews.map((src, i) => (
                 <div key={src.slice(0, 40) + i} className="relative aspect-square rounded-xl overflow-hidden bg-gray-100">
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={src} alt="" className="w-full h-full object-cover" />
@@ -176,7 +195,7 @@ export default function PostAdPage() {
                   )}
                 </div>
               ))}
-              {photos.length < MAX_PHOTOS && (
+              {photoPreviews.length < MAX_PHOTOS && (
                 <label className={`aspect-square rounded-xl border-2 border-dashed grid place-items-center transition-colors ${
                   compressing
                     ? "border-brand-300 text-brand-500 cursor-wait"

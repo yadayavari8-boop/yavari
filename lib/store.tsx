@@ -12,12 +12,25 @@ import {
 import { Currency, Listing } from "./types";
 import { MOCK_LISTINGS } from "./mockData";
 import { idbGet, idbSet } from "./idbStore";
+import {
+  isSupabaseConfigured,
+  supabase,
+  fetchListings as fetchListingsRemote,
+  insertListing,
+  updateListingRow,
+  deleteListingRow,
+} from "./supabase";
 
 const LISTINGS_KEY = "bazaar:listings";
 const CURRENCY_KEY = "bazaar:currency";
 const CITY_KEY = "bazaar:city";
 
 export const ALL_CITIES_LABEL = "هەموو شارەکان";
+
+/** "cloud": shared Supabase backend, visible on every device.
+ *  "local": per-device IndexedDB only — the app's fallback when no
+ *  Supabase project is connected yet (see lib/supabase.ts). */
+export type SyncMode = "cloud" | "local";
 
 function mergeWithMock(stored: Listing[]): Listing[] {
   const byId = new Map(MOCK_LISTINGS.map((l) => [l.id, l]));
@@ -26,21 +39,17 @@ function mergeWithMock(stored: Listing[]): Listing[] {
 }
 
 /**
- * Listings (including their photos) live in IndexedDB, not localStorage —
- * localStorage caps out around 5-10MB per site, which even one or two
- * uncompressed phone photos can exceed, causing posts to silently fail to
- * save. IndexedDB's quota is dramatically larger and fits this use case.
+ * Local-only fallback storage. Listings (with photos) live in IndexedDB,
+ * not localStorage — localStorage caps out around 5-10MB per site, which
+ * even a couple of uncompressed phone photos can exceed.
  */
-async function loadListings(): Promise<Listing[]> {
+async function loadLocalListings(): Promise<Listing[]> {
   try {
     const stored = await idbGet<Listing[]>(LISTINGS_KEY);
     if (stored) return mergeWithMock(stored);
   } catch {
-    // IndexedDB unavailable — fall through to the one-time migration below
+    // fall through to legacy localStorage migration below
   }
-
-  // One-time migration for anyone who used an earlier build that stored
-  // listings in localStorage — carry that data forward instead of losing it.
   try {
     const raw = window.localStorage.getItem(LISTINGS_KEY);
     if (raw) {
@@ -52,12 +61,14 @@ async function loadListings(): Promise<Listing[]> {
   } catch {
     // ignore corrupt/unavailable legacy data
   }
-
   return MOCK_LISTINGS;
 }
 
+type NewListingInput = Omit<Listing, "id" | "created_at">;
+
 interface AppStore {
   hydrated: boolean;
+  syncMode: SyncMode;
   // filters
   city: string;
   setCity: (c: string) => void;
@@ -68,8 +79,8 @@ interface AppStore {
 
   // listings
   listings: Listing[];
-  /** Resolves once the new listing is confirmed saved; rejects if it wasn't. */
-  addListing: (listing: Listing) => Promise<void>;
+  /** Resolves with the saved listing (including its final id) once confirmed. */
+  addListing: (listing: NewListingInput) => Promise<Listing>;
   updateListing: (id: string, patch: Partial<Listing>) => void;
   deleteListing: (id: string) => void;
   getListingById: (id: string) => Listing | undefined;
@@ -83,21 +94,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const [searchQuery, setSearchQuery] = useState("");
   const [listings, setListings] = useState<Listing[]>(MOCK_LISTINGS);
   const [hydrated, setHydrated] = useState(false);
+  const syncMode: SyncMode = isSupabaseConfigured ? "cloud" : "local";
 
-  // Keep a ref in sync so add/update/delete can compute the *next* array
-  // synchronously and persist that exact value, instead of racing React's
-  // batched state updates.
   const listingsRef = useRef<Listing[]>(listings);
   useEffect(() => {
     listingsRef.current = listings;
   }, [listings]);
 
+  // Initial load + (cloud mode) live subscription so listings posted on
+  // another device show up here without a manual refresh.
   useEffect(() => {
     let cancelled = false;
 
     (async () => {
-      const loaded = await loadListings();
-      if (!cancelled) setListings(loaded);
+      if (isSupabaseConfigured) {
+        const { data, error } = await fetchListingsRemote();
+        if (!cancelled && !error && data) setListings(data as Listing[]);
+      } else {
+        const loaded = await loadLocalListings();
+        if (!cancelled) setListings(loaded);
+      }
 
       try {
         const savedCurrency = window.localStorage.getItem(CURRENCY_KEY) as Currency | null;
@@ -105,14 +121,47 @@ export function AppProvider({ children }: { children: ReactNode }) {
         if (savedCurrency === "IQD" || savedCurrency === "USD") setCurrency(savedCurrency);
         if (savedCity) setCityState(savedCity);
       } catch {
-        // localStorage unavailable — filters just won't persist, non-critical
+        // non-critical
       }
 
       if (!cancelled) setHydrated(true);
     })();
 
+    if (!isSupabaseConfigured) {
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const channel = supabase
+      .channel("listings-sync")
+      .on(
+        "postgres_changes",
+        { event: "*", schema: "public", table: "listings" },
+        (payload) => {
+          setListings((prev) => {
+            if (payload.eventType === "INSERT") {
+              const row = payload.new as Listing;
+              if (prev.some((l) => l.id === row.id)) return prev;
+              return [row, ...prev];
+            }
+            if (payload.eventType === "UPDATE") {
+              const row = payload.new as Listing;
+              return prev.map((l) => (l.id === row.id ? row : l));
+            }
+            if (payload.eventType === "DELETE") {
+              const oldRow = payload.old as { id: string };
+              return prev.filter((l) => l.id !== oldRow.id);
+            }
+            return prev;
+          });
+        }
+      )
+      .subscribe();
+
     return () => {
       cancelled = true;
+      supabase.removeChannel(channel);
     };
   }, []);
 
@@ -142,24 +191,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const addListing = useCallback(async (listing: Listing) => {
-    const next = [listing, ...listingsRef.current];
+  const addListing = useCallback(async (input: NewListingInput): Promise<Listing> => {
+    if (isSupabaseConfigured) {
+      const { data, error } = await insertListing(input);
+      if (error || !data) throw error ?? new Error("insert failed");
+      const saved = data as Listing;
+      // The realtime subscription above will also deliver this INSERT; the
+      // de-dupe check there keeps this from double-adding it.
+      setListings((prev) => [saved, ...prev]);
+      return saved;
+    }
+
+    const saved: Listing = {
+      ...input,
+      id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      created_at: new Date().toISOString(),
+    };
+    const next = [saved, ...listingsRef.current];
     setListings(next);
-    // Persisted explicitly (not via a background effect) so the caller can
-    // await confirmation and show an error instead of a false "success".
     await idbSet(LISTINGS_KEY, next);
+    return saved;
   }, []);
 
   const updateListing = useCallback((id: string, patch: Partial<Listing>) => {
     const next = listingsRef.current.map((l) => (l.id === id ? { ...l, ...patch } : l));
     setListings(next);
-    idbSet(LISTINGS_KEY, next).catch(() => {});
+    if (isSupabaseConfigured) {
+      updateListingRow(id, patch).catch(() => {});
+    } else {
+      idbSet(LISTINGS_KEY, next).catch(() => {});
+    }
   }, []);
 
   const deleteListing = useCallback((id: string) => {
     const next = listingsRef.current.filter((l) => l.id !== id);
     setListings(next);
-    idbSet(LISTINGS_KEY, next).catch(() => {});
+    if (isSupabaseConfigured) {
+      deleteListingRow(id).catch(() => {});
+    } else {
+      idbSet(LISTINGS_KEY, next).catch(() => {});
+    }
   }, []);
 
   const getListingById = useCallback(
@@ -171,6 +242,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     <AppContext.Provider
       value={{
         hydrated,
+        syncMode,
         city,
         setCity,
         currency,
