@@ -1,10 +1,7 @@
-export const revalidate = 0;
-export const dynamic = "force-dynamic";
-
 "use client";
 
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useMemo, useState } from "react";
 import Header from "@/components/Header";
 import CategoryFilter from "@/components/CategoryFilter";
 import ProductCard from "@/components/ProductCard";
@@ -12,13 +9,35 @@ import FilterSheet, { SortOption } from "@/components/FilterSheet";
 import { useAppStore, ALL_CITIES_LABEL } from "@/lib/store";
 import { CategorySlug, Condition } from "@/lib/types";
 import { SlidersHorizontal, PlusCircle, PackageSearch } from "lucide-react";
+import { supabase } from "@/lib/supabase";
 
 export default function HomePage() {
-  const { listings, city, searchQuery } = useAppStore();
+  const { city, searchQuery } = useAppStore();
+  const [listings, setListings] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+
   const [activeCategory, setActiveCategory] = useState<CategorySlug | null>(null);
   const [condition, setCondition] = useState<Condition | null>(null);
   const [sort, setSort] = useState<SortOption>("newest");
   const [filterOpen, setFilterOpen] = useState(false);
+
+  // Fetch live listings from Supabase on mount
+  useEffect(() => {
+    async function fetchListings() {
+      setLoading(true);
+      const { data, error } = await supabase
+        .from("listings")
+        .select("*")
+        .order("created_at", { ascending: false });
+
+      if (!error && data) {
+        setListings(data);
+      }
+      setLoading(false);
+    }
+
+    fetchListings();
+  }, []);
 
   const activeFilterCount = (condition ? 1 : 0) + (sort !== "newest" ? 1 : 0);
 
@@ -38,8 +57,8 @@ export default function HomePage() {
       const q = searchQuery.trim().toLowerCase();
       filtered = filtered.filter(
         (l) =>
-          l.title_ckb.toLowerCase().includes(q) ||
-          l.description_ckb.toLowerCase().includes(q)
+          l.title_ckb?.toLowerCase().includes(q) ||
+          l.description_ckb?.toLowerCase().includes(q)
       );
     }
 
@@ -52,7 +71,9 @@ export default function HomePage() {
         sorted.sort((a, b) => b.price_iqd - a.price_iqd);
         break;
       default:
-        sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+        sorted.sort(
+          (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+        );
     }
 
     return sorted;
@@ -67,7 +88,9 @@ export default function HomePage() {
         <div className="flex items-center justify-between px-4 pb-2">
           <h1 className="text-sm font-bold text-ink">
             {results.length} ڕیکلام دۆزرایەوە
-            {city !== ALL_CITIES_LABEL && <span className="text-gray-400 font-normal"> · {city}</span>}
+            {city !== ALL_CITIES_LABEL && (
+              <span className="text-gray-400 font-normal"> · {city}</span>
+            )}
           </h1>
           <button
             onClick={() => setFilterOpen(true)}
@@ -83,19 +106,27 @@ export default function HomePage() {
           </button>
         </div>
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 px-4 pb-24">
-          {results.map((listing) => (
-            <ProductCard key={listing.id} listing={listing} />
-          ))}
-        </div>
+        {loading ? (
+          <div className="text-center py-24 text-gray-400 text-sm">
+            بارکردنی ڕیکلامەکان...
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-3 px-4 pb-24">
+            {results.map((listing) => (
+              <ProductCard key={listing.id} listing={listing} />
+            ))}
+          </div>
+        )}
 
-        {results.length === 0 && listings.length === 0 && (
+        {!loading && results.length === 0 && listings.length === 0 && (
           <div className="text-center py-24 px-4">
             <div className="w-14 h-14 rounded-full bg-brand-50 text-brand-600 grid place-items-center mx-auto mb-4">
               <PackageSearch className="w-6 h-6" strokeWidth={2} />
             </div>
             <p className="font-bold text-ink">هێشتا هیچ ڕیکلامێک نییە</p>
-            <p className="text-sm text-gray-500 mt-1 mb-5">یەکەم کەس بە کە ڕیکلامێک دادەنێت</p>
+            <p className="text-sm text-gray-500 mt-1 mb-5">
+              یەکەم کەس بە کە ڕیکلامێک دادەنێت
+            </p>
             <Link
               href="/post"
               className="inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 transition-colors text-white font-bold rounded-full px-6 py-3 text-sm"
@@ -106,10 +137,12 @@ export default function HomePage() {
           </div>
         )}
 
-        {results.length === 0 && listings.length > 0 && (
+        {!loading && results.length === 0 && listings.length > 0 && (
           <div className="text-center py-24 text-gray-400 px-4">
             <p className="font-semibold">هیچ ڕیکلامێک نەدۆزرایەوە</p>
-            <p className="text-sm mt-1">تاقی بکەرەوە بە هەڵبژاردنێکی تر یان شارێکی تر</p>
+            <p className="text-sm mt-1">
+              تاقی بکەرەوە بە هەڵبژاردنێکی تر یان شارێکی تر
+            </p>
           </div>
         )}
       </main>
