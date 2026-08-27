@@ -35,6 +35,23 @@ export const LISTING_COLUMNS = [
 export type ListingColumn = (typeof LISTING_COLUMNS)[number];
 
 /**
+ * Same idea as LISTING_COLUMNS, for the `users` table — used when signing
+ * up/in against a real Supabase backend (see lib/auth.tsx).
+ */
+export const USER_COLUMNS = [
+  "id",
+  "full_name",
+  "phone",
+  "city",
+  "avatar_url",
+  "is_verified",
+  "rating",
+  "created_at",
+] as const;
+
+export type UserColumn = (typeof USER_COLUMNS)[number];
+
+/**
  * Strips any key not in `allowedKeys` and drops keys whose value is
  * `undefined` (Supabase's client sends `undefined` fields as literal
  * `null` writes otherwise, which is rarely what you want). Returns a new

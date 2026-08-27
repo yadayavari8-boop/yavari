@@ -48,14 +48,18 @@ kurdistan-marketplace/
 │   ├── page.tsx                # Homepage feed (search, categories, grid)
 │   ├── login/
 │   │   ├── page.tsx             # Login route shell (Suspense boundary)
-│   │   └── LoginForm.tsx        # Two-step phone+OTP form
+│   │   └── LoginForm.tsx        # Sign in / sign up tabs
 │   ├── item/[id]/
 │   │   ├── page.tsx            # Item details (gallery, gated CTAs, safety box)
 │   │   └── ItemPrice.tsx       # Client subcomponent for currency-aware price
 │   ├── post/
 │   │   └── page.tsx            # Post-an-ad form (auth-gated)
-│   └── profile/
-│       └── page.tsx            # Seller dashboard (active/sold, edit/delete)
+│   ├── profile/
+│   │   └── page.tsx            # Seller dashboard (active/sold, edit/delete)
+│   └── admin/
+│       ├── page.tsx            # Admin dashboard — every listing, search, delete/sold-toggle
+│       └── edit/[id]/
+│           └── page.tsx        # Admin edit form for any listing
 ├── components/
 │   ├── Header.tsx               # Sticky header: logo, search, city, currency, account
 │   ├── SearchBar.tsx
@@ -76,13 +80,14 @@ kurdistan-marketplace/
 │   ├── store.tsx                 # City/currency/search + dual-mode listings CRUD
 │   ├── idbStore.ts               # Minimal IndexedDB key-value wrapper (local mode)
 │   ├── imageUtils.ts             # Client-side photo compression before storage
-│   ├── auth.tsx                  # Phone-based session (demo mode, Supabase-ready)
-│   ├── sanitize.ts               # LISTING_COLUMNS allowlist + payload sanitizer
+│   ├── auth.tsx                  # Phone-based sign up/sign in + admin detection (demo mode, Supabase-ready)
+│   ├── sanitize.ts               # LISTING_COLUMNS/USER_COLUMNS allowlists + payload sanitizer
 │   ├── errors.ts                 # extractMessage() — readable text from any thrown value
 │   └── supabase.ts               # Supabase client + Auth/DB/Storage helpers
 ├── supabase/
 │   ├── schema.sql                # Fresh-install schema: users, categories, listings, featured_payments
 │   ├── fix_listings_schema.sql   # Idempotent repair script for a drifted live `listings` table
+│   ├── fix_users_schema.sql      # Idempotent repair for `users` (drops phone unique constraint)
 │   └── fix_storage_bucket.sql    # Idempotent fix for "Bucket not found" (listing-photos bucket + policies)
 ├── tailwind.config.ts
 ├── next.config.js
@@ -91,31 +96,52 @@ kurdistan-marketplace/
 
 ## Auth flow
 
-Phone-based sign-in, gated on two actions: **posting an ad** and
+Phone-based sign up / sign in, gated on two actions: **posting an ad** and
 **contacting a seller** (Call / WhatsApp buttons on the item page). Anyone
 can still browse and search without an account.
 
-`lib/auth.tsx` currently runs in **single-step demo mode** — name, phone,
-and city are enough to sign in immediately, no verification code. This is
-intentional for now; when you're ready to add real phone verification, the
-Supabase OTP calls are already sitting in `lib/supabase.ts` ready to wire
-in:
+`lib/auth.tsx` runs in **demo mode** — no SMS verification code — but sign
+up and sign in are two distinct, real flows:
+
+- **Sign up** (`signUp()`) always creates a brand-new account, even if the
+  phone number was used before. There's no duplicate check by design —
+  the `users.phone` column has no unique constraint (see
+  `supabase/fix_users_schema.sql` if migrating an existing database).
+- **Sign in** (`signIn()`) looks up an account by phone number and resolves
+  to the most recently created match. It throws a `NOT_FOUND` error the
+  login form catches and turns into "no account with this number — sign
+  up instead."
+
+When you're ready to add real phone verification, the Supabase OTP calls
+are already sitting in `lib/supabase.ts` ready to wire in:
 
 ```ts
 await requestOtp(phone);                      // sends real SMS
 await verifyOtp(phone, code);                 // returns a Supabase session
 ```
 
-Wire an SMS provider (Twilio, MessageBird, Vonage) under
-**Authentication → Providers → Phone** in the Supabase dashboard when that
-happens. The DB trigger `on_auth_user_created` in `supabase/schema.sql`
-already auto-creates the matching `public.users` profile row on first
-verification.
-
 A posted listing's seller **name** always comes from the signed-in account.
 The **contact phone** is pre-filled from the account too, but stays
 editable per-listing on the post form — sellers can override it if their
 number on file is outdated or was mistyped at signup.
+
+### Admin
+
+The phone number `+9647508415385` (see `ADMIN_PHONE` in `lib/auth.tsx`) is
+treated as an admin on sign up or sign in — `user.isAdmin` becomes `true`.
+Admins get:
+
+- An "Admin" link in the header and on their profile page, going to
+  `/admin` — a dashboard listing **every** listing from every seller,
+  searchable by title, seller name, or phone.
+- Working **edit** (`/admin/edit/[id]`, a full form pre-filled with the
+  listing's current data — including photos, which can be individually
+  removed or added to) and **delete** on any listing, not just their own.
+
+Since there's no real phone verification yet, anyone who signs up or in
+with that exact number gets admin access — the same open-auth trade-off
+already noted below for RLS. Tighten this alongside re-enabling OTP if
+this ever needs to be genuinely secure.
 
 ## Cloud sync vs. local-only mode — and why ads didn't show on other devices
 
@@ -229,6 +255,25 @@ a bucket problem shows a specific "storage bucket not set up" message
 pointing at this fix, instead of the generic save-failed message — see
 `extractMessage()` in `lib/errors.ts` and the upload-vs-save error
 handling in `app/post/page.tsx`.
+
+## Why "delete" (and "mark as sold") sometimes did nothing
+
+`updateListingRow()`/`deleteListingRow()` in `lib/supabase.ts` now check
+the actual rows Supabase reports as affected, not just whether the request
+errored. That distinction matters: when Row Level Security blocks a write,
+PostgREST does **not** throw an error — it reports success with zero rows
+changed. A delete button wired to "did this throw?" looks like it worked
+even when nothing happened, which is exactly what made this look broken
+with no explanation.
+
+Both functions now throw a real, visible error when zero rows were
+affected, `lib/store.tsx`'s `updateListing()`/`deleteListing()` are async
+and propagate that error instead of swallowing it, and the profile/admin
+pages `await` them and show the message on screen. If you still hit this
+after updating, it means your live `listings` table has the RLS policies
+from an older version of `supabase/schema.sql` — run
+`supabase/fix_listings_schema.sql` to replace them with the open policies
+the app currently expects.
 
 ## Featured / VIP listings — currently disabled
 
