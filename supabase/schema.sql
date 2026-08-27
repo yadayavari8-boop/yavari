@@ -24,20 +24,13 @@ create type payment_status_enum as enum ('pending', 'paid', 'failed', 'refunded'
 create table public.users (
   id            uuid primary key default uuid_generate_v4(),
   full_name     text not null,
-  phone         text not null,                       -- E.164 format, e.g. +9647501234567
-                                                       -- NOT unique on purpose: signing up
-                                                       -- always creates a new account, even
-                                                       -- for a phone already registered — see
-                                                       -- lib/auth.tsx signUp(). Sign-in resolves
-                                                       -- to the most recently created match.
+  phone         text not null unique,               -- E.164 format, e.g. +9647501234567
   city          city_enum not null default 'هەولێر',
   avatar_url    text,
   is_verified   boolean not null default false,      -- true once real phone OTP is wired in
   rating        numeric(2,1) not null default 5.0,
   created_at    timestamptz not null default now()
 );
-
-create index users_phone_idx on public.users (phone);
 
 -- ---------------------------------------------------------------------------
 -- CATEGORIES

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Plus, LogIn, ShieldCheck } from "lucide-react";
+import { Plus, LogIn } from "lucide-react";
 import SearchBar from "./SearchBar";
 import CitySelector from "./CitySelector";
 import CurrencyToggle from "./CurrencyToggle";
@@ -28,17 +28,6 @@ export default function Header() {
 
         <CitySelector />
         <CurrencyToggle />
-
-        {hydrated && user?.isAdmin && (
-          <Link
-            href="/admin"
-            aria-label="دەشبۆردی ئەدمین"
-            className="hidden sm:flex items-center gap-1 text-xs font-bold bg-ink text-white rounded-full px-3 py-2 shrink-0"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            ئەدمین
-          </Link>
-        )}
 
         {hydrated && user ? (
           <Link
