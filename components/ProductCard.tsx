@@ -1,7 +1,9 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
 import SmartImage from "./SmartImage";
+import SoldPopup from "./SoldPopup";
 import { MapPin } from "lucide-react";
 import { Listing } from "@/lib/types";
 import { useAppStore, formatPrice } from "@/lib/store";
@@ -9,19 +11,19 @@ import { timeAgoCkb } from "@/lib/format";
 
 export default function ProductCard({ listing }: { listing: Listing }) {
   const { currency } = useAppStore();
+  const [showSoldPopup, setShowSoldPopup] = useState(false);
 
-  return (
-    <Link
-      href={`/item/${listing.id}`}
-      className="group block bg-white rounded-2xl overflow-hidden shadow-card hover:shadow-cardHover transition-shadow"
-    >
+  const cardInner = (
+    <>
       <div className="relative aspect-square bg-gray-100">
         <SmartImage
           src={listing.images[0]}
           alt={listing.title_ckb}
           fill
           sizes="(max-width: 640px) 50vw, (max-width: 1024px) 33vw, 20vw"
-          className="object-cover group-hover:scale-[1.03] transition-transform duration-300"
+          className={`object-cover transition-transform duration-300 ${
+            listing.is_sold ? "grayscale" : "group-hover:scale-[1.03]"
+          }`}
         />
         {listing.is_sold && (
           <span className="absolute inset-0 bg-black/55 flex items-center justify-center text-white font-extrabold text-sm">
@@ -31,10 +33,16 @@ export default function ProductCard({ listing }: { listing: Listing }) {
       </div>
 
       <div className="p-3">
-        <p className="font-extrabold text-brand-600 text-[15px] leading-none mb-1.5">
+        <p
+          className={`font-extrabold text-[15px] leading-none mb-1.5 ${
+            listing.is_sold ? "text-gray-400" : "text-brand-600"
+          }`}
+        >
           {formatPrice(listing.price_iqd, listing.price_usd, currency)}
         </p>
-        <h3 className="text-sm text-ink line-clamp-2 min-h-[2.5rem]">{listing.title_ckb}</h3>
+        <h3 className={`text-sm line-clamp-2 min-h-[2.5rem] ${listing.is_sold ? "text-gray-400" : "text-ink"}`}>
+          {listing.title_ckb}
+        </h3>
         <div className="flex items-center justify-between mt-2 text-[11px] text-gray-500">
           <span className="flex items-center gap-1 truncate">
             <MapPin className="w-3 h-3 shrink-0" />
@@ -43,6 +51,30 @@ export default function ProductCard({ listing }: { listing: Listing }) {
           <span className="shrink-0">{timeAgoCkb(listing.created_at)}</span>
         </div>
       </div>
+    </>
+  );
+
+  if (listing.is_sold) {
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() => setShowSoldPopup(true)}
+          className="group block w-full text-right bg-white rounded-2xl overflow-hidden shadow-card cursor-not-allowed"
+        >
+          {cardInner}
+        </button>
+        {showSoldPopup && <SoldPopup onClose={() => setShowSoldPopup(false)} />}
+      </>
+    );
+  }
+
+  return (
+    <Link
+      href={`/item/${listing.id}`}
+      className="group block bg-white rounded-2xl overflow-hidden shadow-card hover:shadow-cardHover transition-shadow"
+    >
+      {cardInner}
     </Link>
   );
 }

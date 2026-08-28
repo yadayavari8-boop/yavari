@@ -21,7 +21,9 @@ export default function HomePage() {
   const activeFilterCount = (condition ? 1 : 0) + (sort !== "newest" ? 1 : 0);
 
   const results = useMemo(() => {
-    let filtered = listings.filter((l) => !l.is_sold);
+    // Sold listings stay visible (never disappear) — clicking one is
+    // intercepted by ProductCard instead, which shows a "sold out" popup.
+    let filtered = listings;
 
     if (city !== ALL_CITIES_LABEL) {
       filtered = filtered.filter((l) => l.city === city);
@@ -52,6 +54,11 @@ export default function HomePage() {
       default:
         sorted.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
     }
+
+    // Sink sold listings to the bottom, without disturbing the relative
+    // order within each group — still visible and searchable, just not
+    // competing with active listings for the top of the feed.
+    sorted.sort((a, b) => Number(a.is_sold) - Number(b.is_sold));
 
     return sorted;
   }, [listings, city, activeCategory, condition, sort, searchQuery]);

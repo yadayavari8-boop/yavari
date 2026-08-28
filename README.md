@@ -68,6 +68,7 @@ kurdistan-marketplace/
 │   ├── CategoryFilter.tsx
 │   ├── FilterSheet.tsx          # Condition + sort filter drawer
 │   ├── AuthGate.tsx             # "log in to continue" prompt card
+│   ├── SoldPopup.tsx            # "this ad is already sold" popup
 │   ├── ProductCard.tsx
 │   ├── SmartImage.tsx           # next/image for remote, <img> for local uploads
 │   ├── ImageGallery.tsx
@@ -274,6 +275,23 @@ after updating, it means your live `listings` table has the RLS policies
 from an older version of `supabase/schema.sql` — run
 `supabase/fix_listings_schema.sql` to replace them with the open policies
 the app currently expects.
+
+## Sold listings — stay visible, block access instead of disappearing
+
+Marking a listing sold no longer removes it from the feed. It sinks to the
+bottom of the results (`app/page.tsx`'s final sort), shows the greyscale
+"فرۆشرا" (sold) badge already built into `ProductCard.tsx`, and stays
+fully searchable/filterable.
+
+Clicking a sold card doesn't navigate in — `ProductCard` renders it as a
+disabled-looking button instead of a link, and clicking shows
+`components/SoldPopup.tsx` ("this ad is already sold, you can no longer
+reach the seller through it") rather than opening the item page. Anyone
+who reaches a sold item's page directly instead (an old bookmark, an
+admin link, browser back button) gets the same popup on load and is sent
+back to the homepage when they dismiss it — the seller's Call/WhatsApp
+buttons were already hidden for sold items before this change; now the
+whole page is gated the same way the card click is.
 
 ## Featured / VIP listings — currently disabled
 

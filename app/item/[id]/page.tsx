@@ -1,11 +1,13 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { Phone, MessageCircle, MapPin, Clock, Tag, LogIn } from "lucide-react";
 import Header from "@/components/Header";
 import ImageGallery from "@/components/ImageGallery";
 import SafetyBox from "@/components/SafetyBox";
+import SoldPopup from "@/components/SoldPopup";
 import { useAppStore } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
 import { CATEGORIES } from "@/lib/mockData";
@@ -16,7 +18,12 @@ export default function ItemDetailsPage({ params }: { params: { id: string } }) 
   const { getListingById, hydrated } = useAppStore();
   const { user, hydrated: authHydrated } = useAuth();
   const pathname = usePathname();
+  const router = useRouter();
   const listing = getListingById(params.id);
+  // Shown for anyone who lands here directly (bookmark, admin link, back
+  // button) on a listing that's since sold — not just clicks from the
+  // feed grid, which ProductCard already intercepts before getting here.
+  const [dismissedSoldNotice, setDismissedSoldNotice] = useState(false);
 
   if (!hydrated || !authHydrated) {
     return (
@@ -144,6 +151,15 @@ export default function ItemDetailsPage({ params }: { params: { id: string } }) 
             )}
           </div>
         </div>
+      )}
+
+      {listing.is_sold && !dismissedSoldNotice && (
+        <SoldPopup
+          onClose={() => {
+            setDismissedSoldNotice(true);
+            router.push("/");
+          }}
+        />
       )}
     </>
   );
