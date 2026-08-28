@@ -1,17 +1,21 @@
 "use client";
 
-import { useMemo } from "react";
-import { Pencil, Trash2, CheckCircle2, Phone, LogOut } from "lucide-react";
+import { useMemo, useState } from "react";
+import Link from "next/link";
+import { Pencil, Trash2, CheckCircle2, Phone, LogOut, ShieldCheck, Loader2 } from "lucide-react";
 import Header from "@/components/Header";
 import AuthGate from "@/components/AuthGate";
 import SmartImage from "@/components/SmartImage";
 import { useAppStore, formatPrice } from "@/lib/store";
 import { useAuth } from "@/lib/auth";
+import { extractMessage } from "@/lib/errors";
 import { Listing } from "@/lib/types";
 
 export default function ProfilePage() {
   const { listings, currency, updateListing, deleteListing, hydrated } = useAppStore();
   const { user, hydrated: authHydrated, logout } = useAuth();
+  const [pendingId, setPendingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState("");
 
   const mine = useMemo(
     () =>
@@ -47,13 +51,28 @@ export default function ProfilePage() {
   const active = mine.filter((l) => !l.is_sold);
   const sold = mine.filter((l) => l.is_sold);
 
-  function toggleSold(id: string, current: boolean) {
-    updateListing(id, { is_sold: !current });
+  async function toggleSold(id: string, current: boolean) {
+    setActionError("");
+    setPendingId(id);
+    try {
+      await updateListing(id, { is_sold: !current });
+    } catch (err) {
+      setActionError(extractMessage(err) || "نوێکردنەوە سەرکەوتوو نەبوو");
+    } finally {
+      setPendingId(null);
+    }
   }
 
-  function remove(id: string) {
-    if (window.confirm("دڵنیایت لە سڕینەوەی ئەم ڕیکلامە؟")) {
-      deleteListing(id);
+  async function remove(id: string) {
+    if (!window.confirm("دڵنیایت لە سڕینەوەی ئەم ڕیکلامە؟")) return;
+    setActionError("");
+    setPendingId(id);
+    try {
+      await deleteListing(id);
+    } catch (err) {
+      setActionError(extractMessage(err) || "سڕینەوە سەرکەوتوو نەبوو");
+    } finally {
+      setPendingId(null);
     }
   }
 
@@ -66,7 +85,15 @@ export default function ProfilePage() {
             {user.name.charAt(0)}
           </div>
           <div className="min-w-0">
-            <h1 className="font-extrabold text-ink truncate">{user.name}</h1>
+            <h1 className="font-extrabold text-ink truncate flex items-center gap-1.5">
+              {user.name}
+              {user.isAdmin && (
+                <span className="inline-flex items-center gap-1 bg-brand-50 text-brand-600 text-[10px] font-bold rounded-full px-2 py-0.5">
+                  <ShieldCheck className="w-3 h-3" />
+                  ئەدمین
+                </span>
+              )}
+            </h1>
             <p className="text-xs text-gray-500 flex items-center gap-1 mt-0.5" dir="ltr">
               <Phone className="w-3 h-3" /> {user.phone}
             </p>
@@ -81,7 +108,24 @@ export default function ProfilePage() {
           </button>
         </div>
 
+        {user.isAdmin && (
+          <Link
+            href="/admin"
+            className="mb-6 flex items-center justify-between bg-ink text-white rounded-2xl px-4 py-3.5"
+          >
+            <span className="flex items-center gap-2 font-bold text-sm">
+              <ShieldCheck className="w-4 h-4" />
+              دەشبۆردی ئەدمین
+            </span>
+            <span className="text-xs text-gray-300">هەموو ڕیکلامەکان بەڕێوەببە</span>
+          </Link>
+        )}
+
         <StatRow activeCount={active.length} soldCount={sold.length} />
+
+        {actionError && (
+          <p className="text-sm text-red-600 font-medium text-center mb-4">{actionError}</p>
+        )}
 
         {!hydrated ? (
           <p className="text-center text-sm text-gray-400 py-10">بارکردن...</p>
@@ -94,6 +138,7 @@ export default function ProfilePage() {
                   key={l.id}
                   listing={l}
                   currency={currency}
+                  pending={pendingId === l.id}
                   onToggleSold={toggleSold}
                   onDelete={remove}
                 />
@@ -107,6 +152,7 @@ export default function ProfilePage() {
                     key={l.id}
                     listing={l}
                     currency={currency}
+                    pending={pendingId === l.id}
                     onToggleSold={toggleSold}
                     onDelete={remove}
                   />
@@ -147,11 +193,13 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function DashboardRow({
   listing,
   currency,
+  pending,
   onToggleSold,
   onDelete,
 }: {
   listing: Listing;
   currency: "IQD" | "USD";
+  pending: boolean;
   onToggleSold: (id: string, current: boolean) => void;
   onDelete: (id: string) => void;
 }) {
@@ -176,25 +224,28 @@ function DashboardRow({
       <div className="flex items-center gap-1 shrink-0">
         <button
           onClick={() => onToggleSold(listing.id, listing.is_sold)}
+          disabled={pending}
           aria-label={listing.is_sold ? "گەڕاندنەوە بۆ چالاک" : "نیشانکردن وەک فرۆشراو"}
-          className={`w-9 h-9 grid place-items-center rounded-full transition-colors ${
+          className={`w-9 h-9 grid place-items-center rounded-full transition-colors disabled:opacity-50 ${
             listing.is_sold ? "bg-gray-100 text-gray-500" : "bg-brand-50 text-brand-600"
           }`}
         >
-          <CheckCircle2 className="w-4 h-4" />
+          {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
         </button>
         <button
           aria-label="دەستکاریکردن"
-          className="w-9 h-9 grid place-items-center rounded-full bg-gray-100 text-gray-600"
+          disabled={pending}
+          className="w-9 h-9 grid place-items-center rounded-full bg-gray-100 text-gray-600 disabled:opacity-50"
         >
           <Pencil className="w-4 h-4" />
         </button>
         <button
           onClick={() => onDelete(listing.id)}
+          disabled={pending}
           aria-label="سڕینەوە"
-          className="w-9 h-9 grid place-items-center rounded-full bg-red-50 text-red-600"
+          className="w-9 h-9 grid place-items-center rounded-full bg-red-50 text-red-600 disabled:opacity-50"
         >
-          <Trash2 className="w-4 h-4" />
+          {pending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
         </button>
       </div>
     </div>

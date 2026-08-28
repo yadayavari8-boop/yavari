@@ -81,8 +81,8 @@ interface AppStore {
   listings: Listing[];
   /** Resolves with the saved listing (including its final id) once confirmed. */
   addListing: (listing: NewListingInput) => Promise<Listing>;
-  updateListing: (id: string, patch: Partial<Listing>) => void;
-  deleteListing: (id: string) => void;
+  updateListing: (id: string, patch: Partial<Listing>) => Promise<void>;
+  deleteListing: (id: string) => Promise<void>;
   getListingById: (id: string) => Listing | undefined;
 }
 
@@ -213,23 +213,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     return saved;
   }, []);
 
-  const updateListing = useCallback((id: string, patch: Partial<Listing>) => {
+  const updateListing = useCallback(async (id: string, patch: Partial<Listing>) => {
+    if (isSupabaseConfigured) {
+      // Confirm the write actually affected a row before touching local
+      // state — an RLS-blocked update "succeeds" with zero rows changed
+      // rather than throwing, which is what made this silently do nothing.
+      await updateListingRow(id, patch);
+    }
     const next = listingsRef.current.map((l) => (l.id === id ? { ...l, ...patch } : l));
     setListings(next);
-    if (isSupabaseConfigured) {
-      updateListingRow(id, patch).catch(() => {});
-    } else {
-      idbSet(LISTINGS_KEY, next).catch(() => {});
+    if (!isSupabaseConfigured) {
+      await idbSet(LISTINGS_KEY, next);
     }
   }, []);
 
-  const deleteListing = useCallback((id: string) => {
+  const deleteListing = useCallback(async (id: string) => {
+    if (isSupabaseConfigured) {
+      await deleteListingRow(id);
+    }
     const next = listingsRef.current.filter((l) => l.id !== id);
     setListings(next);
-    if (isSupabaseConfigured) {
-      deleteListingRow(id).catch(() => {});
-    } else {
-      idbSet(LISTINGS_KEY, next).catch(() => {});
+    if (!isSupabaseConfigured) {
+      await idbSet(LISTINGS_KEY, next);
     }
   }, []);
 

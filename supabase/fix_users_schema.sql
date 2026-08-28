@@ -10,12 +10,14 @@
 -- Run in Supabase → SQL Editor → New query → Run.
 -- ============================================================================
 
+create extension if not exists "uuid-ossp";
+
 do $$ begin
   create type city_enum as enum ('هەولێر', 'سلێمانی', 'دهۆک', 'هەڵەبجە');
 exception when duplicate_object then null; end $$;
 
 create table if not exists public.users (
-  id            uuid primary key default gen_random_uuid(),
+  id            uuid primary key default uuid_generate_v4(),
   created_at    timestamptz not null default now()
 );
 

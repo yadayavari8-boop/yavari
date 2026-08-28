@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { sanitizePayload } from "./sanitize";
+import { sanitizePayload, USER_COLUMNS } from "./sanitize";
 
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
 const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
@@ -20,6 +20,24 @@ export const supabase = createClient(
   supabaseUrl || "https://placeholder.supabase.co",
   supabaseAnonKey || "placeholder-anon-key"
 );
+
+export async function fetchUserByPhone(phone: string) {
+  // Sign-up is allowed to create duplicate accounts for the same phone by
+  // design (see lib/auth.tsx) — sign-in resolves to the most recently
+  // created matching account.
+  return supabase
+    .from("users")
+    .select("*")
+    .eq("phone", phone)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+}
+
+export async function insertUserRow(payload: Record<string, unknown>) {
+  const clean = sanitizePayload(payload, USER_COLUMNS);
+  return supabase.from("users").insert(clean).select().single();
+}
 
 /**
  * ---------------------------------------------------------------------
@@ -83,11 +101,28 @@ export async function updateListingRow(id: string, patch: Record<string, unknown
     console.log("[supabase] update → listings payload:", { id, clean });
   }
 
-  return supabase.from("listings").update(clean).eq("id", id).select().single();
+  const { data, error } = await supabase.from("listings").update(clean).eq("id", id).select();
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    // PostgREST returns success with zero affected rows when RLS blocks a
+    // write — it does NOT throw an error. This is what makes a stale/too-
+    // strict policy look like a silently broken button instead of a clear
+    // failure, so we turn it into a real thrown error here.
+    throw new Error(
+      "ڕیکلامەکە نوێ نەکرایەوە — لەوانەیە RLS ڕێگری لێ بکات. supabase/fix_listings_schema.sql جێبەجێ بکە."
+    );
+  }
+  return data[0];
 }
 
 export async function deleteListingRow(id: string) {
-  return supabase.from("listings").delete().eq("id", id);
+  const { data, error } = await supabase.from("listings").delete().eq("id", id).select();
+  if (error) throw error;
+  if (!data || data.length === 0) {
+    throw new Error(
+      "ڕیکلامەکە نەسڕایەوە — لەوانەیە RLS ڕێگری لێ بکات. supabase/fix_listings_schema.sql جێبەجێ بکە."
+    );
+  }
 }
 
 /** Uploads one compressed photo to the public `listing-photos` bucket, returns its public URL. */
